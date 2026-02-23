@@ -1,79 +1,153 @@
 """
-HEM Product Catalogue - Sidebar Module
-Template management, sync controls, and database info.
+HEM Product Catalogue v3 — Sidebar
+Renders: logo, template save/load/delete, data sync, database info.
 """
 import time
 import streamlit as st
 
 from database import (
-    load_products_db, load_cart_from_db, save_cart_to_db,
     load_saved_templates, save_template_to_disk, delete_template,
+    load_products_db,
 )
+from cart import clear_cart
+from cloudinary_client import fetch_all_cloudinary_resources
 
 
-def render_sidebar():
-    """Render the sidebar with templates, sync, and DB info."""
+def render_sidebar() -> None:
+    """Render the full left sidebar."""
     with st.sidebar:
-        st.header("Manage Templates")
+        # ── Logo / branding ───────────────────────────────────────────────
+        st.markdown(
+            """
+            <div style="text-align:center;padding:20px 0 12px;">
+                <div style="font-size:38px;margin-bottom:4px;">🪔</div>
+                <div style="font-family:'Playfair Display',serif;
+                            font-size:20px;font-weight:700;
+                            color:#f5a832;
+                            letter-spacing:2px;">HEM EXPORTS</div>
+                <div style="font-size:10px;color:rgba(255,220,200,0.65);letter-spacing:3px;
+                            text-transform:uppercase;margin-top:2px;">Catalogue Manager</div>
+            </div>
+            <div class="gold-divider" style="margin:0 0 16px;"></div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-        # --- Save Template ---
-        with st.expander("Save Current Cart"):
-            new_template_name = st.text_input("Template Name", key="sidebar_template_name")
-            if st.button("Save Template", use_container_width=True, key="sidebar_save_template"):
-                if new_template_name:
-                    save_template_to_disk(new_template_name, st.session_state.cart)
-                else:
-                    st.warning("Please enter a template name.")
+        # ── Cart summary ──────────────────────────────────────────────────
+        cart_count = len(st.session_state.cart)
+        cat_count  = len(set(i.get("Category", "") for i in st.session_state.cart))
+        st.markdown(
+            f"""
+            <div style="background:rgba(200,16,46,0.10);
+                        border:1px solid rgba(200,16,46,0.25);border-radius:12px;
+                        padding:14px 18px;margin-bottom:16px;text-align:center;">
+                <div style="font-size:11px;color:rgba(255,220,200,0.65);text-transform:uppercase;
+                             letter-spacing:1px;margin-bottom:6px;">Current Cart</div>
+                <div style="font-size:28px;font-weight:700;color:#f5a832;
+                             font-family:'Playfair Display',serif;">{cart_count}</div>
+                <div style="font-size:11px;color:rgba(255,220,200,0.55);">
+                    products · {cat_count} categories
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-        # --- Load Template ---
-        saved_templates = load_saved_templates()
-        if saved_templates:
-            with st.expander("Load Template"):
-                sel_temp = st.selectbox(
-                    "Select Template",
-                    list(saved_templates.keys()),
-                    key="sidebar_load_select",
-                )
-                col_load, col_del_temp = st.columns(2)
-                with col_load:
-                    if st.button("Load", use_container_width=True, key="sidebar_load_btn"):
-                        st.session_state.cart = saved_templates[sel_temp]
-                        save_cart_to_db(st.session_state.cart)
-                        st.toast(f"Template '{sel_temp}' loaded!", icon="\u2705")
-                        st.rerun()
-                with col_del_temp:
-                    if st.button("Delete", use_container_width=True, key="sidebar_del_template"):
-                        delete_template(sel_temp)
-                        st.rerun()
-
-        # --- Debug Logs ---
-        with st.expander("Image Sync Debugger", expanded=False):
-            if 'debug_logs' in st.session_state:
-                for line in st.session_state['debug_logs']:
-                    st.text(line)
-
-        st.markdown("---")
-
-        # --- Data Sync ---
-        st.markdown("### Data Sync")
-        if st.button(
-            "Refresh Cloudinary & Excel",
-            help="Click if you uploaded new images or changed the Excel file.",
-            use_container_width=True,
-            key="sidebar_refresh",
-        ):
-            st.session_state.data_timestamp = time.time()
+        # ── Data sync ─────────────────────────────────────────────────────
+        st.markdown("### 🔄 Data Sync")
+        if st.button("Refresh Cloudinary & Excel", use_container_width=True):
             st.cache_data.clear()
+            st.session_state.data_timestamp = time.time()
+            st.session_state.gen_pdf_bytes  = None
+            st.session_state.gen_excel_bytes= None
+            st.toast("Data refreshed!", icon="🔄")
             st.rerun()
 
-        st.markdown("---")
+        st.markdown('<div class="gold-divider" style="margin:14px 0;"></div>',
+                    unsafe_allow_html=True)
 
-        # --- Database Info ---
-        st.markdown("### Database Info")
-        db_info = load_products_db()
-        st.caption(f"Overrides: {len(db_info.get('product_overrides', {}))}")
-        st.caption(f"Custom Products: {len(db_info.get('custom_products', []))}")
-        st.caption(f"Hidden Products: {len(db_info.get('deleted_products', []))}")
-        st.caption(f"Cart Items: {len(db_info.get('saved_cart', []))}")
-        if db_info.get('last_updated'):
-            st.caption(f"Last Updated: {db_info['last_updated'][:19]}")
+        # ── Template management ───────────────────────────────────────────
+        st.markdown("### 💾 Templates")
+
+        # Save current cart as a named template
+        with st.expander("Save Current Cart as Template"):
+            tpl_name = st.text_input(
+                "Template Name",
+                placeholder="e.g. Dubai Q2 Order",
+                key="sidebar_tpl_name_input",
+            )
+            if st.button("Save Template", use_container_width=True,
+                         key="sidebar_save_tpl_btn"):
+                if tpl_name.strip() and st.session_state.cart:
+                    save_template_to_disk(tpl_name.strip(), st.session_state.cart)
+                elif not tpl_name.strip():
+                    st.warning("Please enter a template name.")
+                else:
+                    st.warning("Cart is empty — nothing to save.")
+
+        # Load / delete existing templates
+        templates = load_saved_templates()
+        if templates:
+            with st.expander(f"Load / Delete Templates ({len(templates)})"):
+                for tpl_name, tpl_items in templates.items():
+                    col_load, col_del = st.columns([3, 1])
+                    with col_load:
+                        if st.button(
+                            f"📂 {tpl_name} ({len(tpl_items)} items)",
+                            key=f"load_tpl_{tpl_name}",
+                            use_container_width=True,
+                        ):
+                            st.session_state.cart          = list(tpl_items)
+                            st.session_state.gen_pdf_bytes = None
+                            st.session_state.gen_excel_bytes = None
+                            st.toast(f"Loaded '{tpl_name}'", icon="📂")
+                            st.rerun()
+                    with col_del:
+                        if st.button("🗑", key=f"del_tpl_{tpl_name}",
+                                     use_container_width=True):
+                            delete_template(tpl_name)
+                            st.toast(f"Deleted '{tpl_name}'", icon="🗑️")
+                            st.rerun()
+        else:
+            st.caption("No templates saved yet.")
+
+        st.markdown('<div class="gold-divider" style="margin:14px 0;"></div>',
+                    unsafe_allow_html=True)
+
+        # ── Database info ─────────────────────────────────────────────────
+        st.markdown("### 🗄️ Database")
+        with st.expander("View DB Stats"):
+            db = load_products_db()
+            st.markdown(
+                f"""
+                <div style="font-size:12px;color:rgba(255,220,200,0.65);line-height:2;">
+                  📦 Custom products: <b style="color:#f5a832;">{len(db.get('custom_products', []))}</b><br>
+                  ✏️ Edited products: <b style="color:#f5a832;">{len(db.get('product_overrides', {}))}</b><br>
+                  🚫 Hidden products: <b style="color:#f5a832;">{len(db.get('deleted_products', []))}</b><br>
+                  🕐 Last updated: <b style="color:#f5a832;">{db.get('last_updated','—')[:19] if db.get('last_updated') else '—'}</b>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        st.markdown('<div class="gold-divider" style="margin:14px 0;"></div>',
+                    unsafe_allow_html=True)
+
+        # ── Debug logs ────────────────────────────────────────────────────
+        debug_logs = st.session_state.get("debug_logs", [])
+        if debug_logs:
+            with st.expander("🔍 Debug Logs"):
+                for line in debug_logs[:30]:
+                    st.caption(line)
+
+        # ── Footer ────────────────────────────────────────────────────────
+        st.markdown(
+            """
+            <div style="margin-top:30px;text-align:center;
+                        font-size:10px;color:rgba(255,220,200,0.45);letter-spacing:1px;">
+                HEM EXPORTS · CATALOGUE v3<br>
+                <span style="color:#f5a832;">◆</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )

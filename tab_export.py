@@ -1,6 +1,6 @@
 """
-HEM Product Catalogue - Tab 3: Export
-PDF and Excel generation with case size selection.
+HEM Product Catalogue v3 — Tab 3: Export
+PDF catalogue + Excel order sheet generation with case-size selection.
 """
 import os
 import json
@@ -13,149 +13,192 @@ from config import BASE_DIR, LOGO_PATH, CASE_SIZE_PATH
 from cloudinary_client import get_image_as_base64_str
 from data_loader import load_data_cached
 from pdf_generator import generate_pdf_html, generate_excel_file, render_pdf
-from ui.components import section_header
+from ui.components import section_header, gold_divider, empty_state
 
 logger = logging.getLogger(__name__)
 
 
-def render_export_tab(products_df):
-    """Render Tab 3: Export Catalogue."""
-    section_header("Export Catalogue")
+def render_export_tab(products_df: pd.DataFrame) -> None:
+    """Render Tab 3 — Export Catalogue."""
+    section_header("Export Catalogue", icon="📄")
 
     if not st.session_state.cart:
-        st.info("Cart is empty. Add products in Tab 1 first.")
+        empty_state("📄", "Cart is empty. Add products in <strong>Filter Products</strong> first.")
         return
 
-    st.markdown("### 1. Select Case Sizes per Category")
+    # ── 1. Case size selection per category ───────────────────────────────
+    st.markdown(
+        '<div style="font-size:13px;color:#6b4040;margin-bottom:12px;">'
+        '◆ Select the carton/case size for each product category in your cart.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 
-    cart_categories = sorted(list(set(
-        [item['Category'] for item in st.session_state.cart]
-    )))
+    cart_categories = sorted({item["Category"] for item in st.session_state.cart})
 
-    # Load case size data
-    full_case_size_df = pd.DataFrame()
-    DB_PATH = os.path.join(BASE_DIR, "data", "database.json")
-    if os.path.exists(DB_PATH):
+    # Load case-size data (from local DB first, then GitHub Excel)
+    full_case_df = pd.DataFrame()
+    local_db     = os.path.join(BASE_DIR, "data", "database.json")
+    if os.path.exists(local_db):
         try:
-            with open(DB_PATH, 'r') as f:
-                db_data = json.load(f)
-            if db_data.get("case_sizes"):
-                full_case_size_df = pd.DataFrame(db_data["case_sizes"])
-        except (json.JSONDecodeError, OSError):
+            with open(local_db) as f:
+                raw = json.load(f)
+            if raw.get("case_sizes"):
+                full_case_df = pd.DataFrame(raw["case_sizes"])
+        except Exception:
             pass
 
-    if full_case_size_df.empty:
+    if full_case_df.empty:
         try:
-            full_case_size_df = pd.read_excel(CASE_SIZE_PATH, dtype=str)
-            full_case_size_df.columns = [c.strip() for c in full_case_size_df.columns]
+            full_case_df = pd.read_excel(CASE_SIZE_PATH, dtype=str)
+            full_case_df.columns = [c.strip() for c in full_case_df.columns]
         except Exception as e:
-            st.error(f"Error loading Case Size data: {e}")
+            st.error(f"Could not load Case Size data: {e}")
 
-    selection_map = {}
-    if not full_case_size_df.empty:
+    selection_map: dict = {}
+
+    if not full_case_df.empty:
         suffix_col = next(
-            (c for c in full_case_size_df.columns if "suffix" in c.lower()),
-            None,
+            (c for c in full_case_df.columns if "suffix" in c.lower()), None
         )
         cbm_col = next(
-            (c for c in full_case_size_df.columns if "cbm" in c.lower()),
-            "CBM",
+            (c for c in full_case_df.columns if "cbm" in c.lower()), "CBM"
         )
+
         if not suffix_col:
             st.error(
-                f"Could not find 'Carton Suffix' column. "
-                f"Found: {full_case_size_df.columns.tolist()}"
+                f"Cannot find 'Carton Suffix' column in Case Size file. "
+                f"Available columns: {full_case_df.columns.tolist()}"
             )
         else:
-            for cat in cart_categories:
-                options = full_case_size_df[
-                    full_case_size_df['Category'] == cat
-                ].copy()
-                if not options.empty:
-                    options['DisplayLabel'] = options.apply(
-                        lambda x: f"{x.get(suffix_col, '')} (CBM: {x.get(cbm_col, '')})",
-                        axis=1,
-                    )
-                    label_list = options['DisplayLabel'].tolist()
-                    selected_label = st.selectbox(
-                        f"Select Case Size for **{cat}**",
-                        label_list,
-                        key=f"select_case_{cat}",
-                    )
-                    selected_row = options[
-                        options['DisplayLabel'] == selected_label
-                    ].iloc[0]
-                    selection_map[cat] = selected_row.to_dict()
-                else:
-                    st.warning(f"No Case Size options found for category: {cat}")
+            cols_per_row = 2
+            cat_chunks   = [
+                cart_categories[i:i+cols_per_row]
+                for i in range(0, len(cart_categories), cols_per_row)
+            ]
+            for chunk in cat_chunks:
+                cols = st.columns(len(chunk))
+                for col, cat in zip(cols, chunk):
+                    with col:
+                        options = full_case_df[
+                            full_case_df["Category"] == cat
+                        ].copy()
+                        if not options.empty:
+                            options["_label"] = options.apply(
+                                lambda x: (
+                                    f"{x.get(suffix_col, '').strip()} "
+                                    f"(CBM: {x.get(cbm_col, '')})"
+                                ),
+                                axis=1,
+                            )
+                            chosen = st.selectbox(
+                                f"📦 **{cat}**",
+                                options["_label"].tolist(),
+                                key=f"case_{cat}",
+                            )
+                            selection_map[cat] = options[
+                                options["_label"] == chosen
+                            ].iloc[0].to_dict()
+                        else:
+                            st.warning(f"No case sizes for: {cat}")
 
-    st.markdown("---")
+    gold_divider()
 
-    # Client name
-    name = st.text_input("Client Name", "Valued Client", key="export_client_name")
+    # ── 2. Client name ────────────────────────────────────────────────────
+    client_name = st.text_input(
+        "👤 Client Name",
+        value="Valued Client",
+        key="export_client_name",
+    )
 
-    # Generate button
-    if st.button("Generate Catalogue & Order Sheet", use_container_width=True, type="primary"):
-        cart_data = st.session_state.cart
-        schema_cols = [
-            'Catalogue', 'Category', 'Subcategory', 'ItemName',
-            'Fragrance', 'SKU Code', 'ImageB64', 'Packaging', 'IsNew',
-        ]
-        df_final = pd.DataFrame(cart_data)
-        for col in schema_cols:
-            if col not in df_final.columns:
-                df_final[col] = ''
+    # ── 3. Generate button ────────────────────────────────────────────────
+    if st.button(
+        "🚀 Generate Catalogue & Order Sheet",
+        use_container_width=True,
+        type="primary",
+    ):
+        _generate_files(products_df, client_name, selection_map)
 
-        # Sort by original Excel order
-        products_df_fresh = load_data_cached(st.session_state.data_timestamp)
-        pid_to_index = {
-            row['ProductID']: i for i, row in products_df_fresh.iterrows()
-        }
-        if 'ProductID' in df_final.columns:
-            df_final['excel_sort_order'] = df_final['ProductID'].map(pid_to_index)
-            max_idx = len(products_df_fresh)
-            df_final['excel_sort_order'] = df_final['excel_sort_order'].fillna(max_idx)
-            df_final = df_final.sort_values('excel_sort_order')
-            df_final = df_final.drop(columns=['excel_sort_order'])
+    gold_divider()
 
-        df_final['SerialNo'] = range(1, len(df_final) + 1)
-
-        st.toast("Generating files...", icon="\u23f3")
-
-        # Generate Excel
-        st.session_state.gen_excel_bytes = generate_excel_file(
-            df_final, name, selection_map
+    # ── 4. Download buttons ───────────────────────────────────────────────
+    if st.session_state.gen_pdf_bytes or st.session_state.gen_excel_bytes:
+        st.markdown(
+            '<div style="font-size:13px;color:#c8102e;margin-bottom:10px;'
+            'letter-spacing:1px;text-transform:uppercase;">◆ Ready to Download</div>',
+            unsafe_allow_html=True,
         )
+        dl_col1, dl_col2 = st.columns(2)
+        with dl_col1:
+            if st.session_state.gen_pdf_bytes:
+                safe_name = client_name.replace(" ", "_")
+                st.download_button(
+                    "⬇️ Download PDF Catalogue",
+                    data=st.session_state.gen_pdf_bytes,
+                    file_name=f"{safe_name}_catalogue.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
+        with dl_col2:
+            if st.session_state.gen_excel_bytes:
+                safe_name = client_name.replace(" ", "_")
+                st.download_button(
+                    "⬇️ Download Excel Order Sheet",
+                    data=st.session_state.gen_excel_bytes,
+                    file_name=f"{safe_name}_order.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
 
-        # Generate PDF
-        logo = get_image_as_base64_str(LOGO_PATH, resize=True, max_size=(200, 100))
-        html = generate_pdf_html(df_final, name, logo, selection_map)
-        pdf_bytes, engine_or_error = render_pdf(html)
 
+def _generate_files(products_df, client_name, selection_map):
+    """Internal helper: build and store PDF + Excel in session state."""
+    cart_data   = st.session_state.cart
+    schema_cols = [
+        "Catalogue", "Category", "Subcategory", "ItemName",
+        "Fragrance", "SKU Code", "ImageB64", "Packaging", "IsNew",
+    ]
+    df = pd.DataFrame(cart_data)
+    for col in schema_cols:
+        if col not in df.columns:
+            df[col] = ""
+
+    # Sort products in the same order as original Excel catalogues
+    fresh_df     = load_data_cached(st.session_state.data_timestamp)
+    pid_to_order = {row["ProductID"]: i for i, row in fresh_df.iterrows()}
+    if "ProductID" in df.columns:
+        df["_order"] = df["ProductID"].map(pid_to_order).fillna(len(fresh_df))
+        df = df.sort_values("_order").drop(columns=["_order"])
+
+    df["SerialNo"] = range(1, len(df) + 1)
+
+    progress = st.progress(0, text="Starting…")
+
+    # Generate Excel
+    progress.progress(20, text="Building Excel order sheet…")
+    try:
+        st.session_state.gen_excel_bytes = generate_excel_file(df, client_name, selection_map)
+    except Exception as e:
+        st.error(f"Excel generation failed: {e}")
+        st.session_state.gen_excel_bytes = None
+
+    # Generate PDF
+    progress.progress(50, text="Rendering PDF (this may take 30–60 seconds)…")
+    try:
+        logo_b64 = get_image_as_base64_str(LOGO_PATH, resize=True, max_size=(200, 100))
+        html     = generate_pdf_html(df, client_name, logo_b64, selection_map)
+        progress.progress(80, text="Finalising PDF…")
+        pdf_bytes, engine_or_err = render_pdf(html)
         if pdf_bytes:
             st.session_state.gen_pdf_bytes = pdf_bytes
-            st.toast(f"PDF generated via {engine_or_error}!", icon="\U0001f389")
+            progress.progress(100, text="Done!")
+            st.toast(f"✅ PDF ready ({engine_or_err})", icon="🎉")
         else:
             st.session_state.gen_pdf_bytes = None
-            st.error(f"PDF generation failed: {engine_or_error}")
-
-    # Download buttons
-    c_pdf, c_excel = st.columns(2)
-    with c_pdf:
-        if st.session_state.gen_pdf_bytes:
-            st.download_button(
-                "Download PDF Catalogue",
-                st.session_state.gen_pdf_bytes,
-                f"{name.replace(' ', '_')}_catalogue.pdf",
-                type="primary",
-                use_container_width=True,
-            )
-    with c_excel:
-        if st.session_state.gen_excel_bytes:
-            st.download_button(
-                "Download Excel Order Sheet",
-                st.session_state.gen_excel_bytes,
-                f"{name.replace(' ', '_')}_order.xlsx",
-                type="secondary",
-                use_container_width=True,
-            )
+            progress.empty()
+            st.error(f"PDF generation failed:\n\n{engine_or_err}")
+    except Exception as e:
+        logger.error(f"PDF exception: {e}")
+        st.session_state.gen_pdf_bytes = None
+        progress.empty()
+        st.error(f"PDF error: {e}")

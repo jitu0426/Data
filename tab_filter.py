@@ -1,308 +1,291 @@
 """
-HEM Product Catalogue - Tab 1: Filter Products
-===============================================
-This tab is the main product browsing interface.
+HEM Product Catalogue v3 — Tab 1: Filter Products
+===================================================
+Lets users browse, search, and select products to add to the cart.
 
-Features:
-  - Global search across ItemName, Fragrance, and SKU Code
-  - Catalogue → Category → Subcategory drill-down filters
-  - Checkbox-based individual product selection (ADD SELECTED)
-  - Bulk add all visible products (ADD FILTERED)
-  - Inline thumbnail previews next to each product name
-  - Badges: NEW, EDITED, CUSTOM, IN CART
+Layout:
+  • Global search bar (searches ItemName, Fragrance, SKU Code)
+  • Search mode  → shows matching products with all categories expanded
+  • Filter mode  → Catalogue selectbox → Category multiselect
+                   → per-category Subcategory multiselect
+  • Action buttons: ADD SELECTED · ADD FILTERED · Clear Filters
+  • Product list: thumbnail | name + badges | checkbox
+
+NOTE: "Select All Categories" and "Deselect All" buttons are
+      intentionally NOT present in this version.
 """
+import pandas as pd
 import streamlit as st
 
 from config import NO_SELECTION_PLACEHOLDER
 from database import load_products_db
 from data_loader import create_safe_id
 from cart import add_to_cart, add_selected_visible_to_cart, clear_filters_dropdown
-from ui.components import product_thumbnail_html, stats_bar
+from ui.components import product_thumbnail_html, stats_bar, empty_state
 
 
-def _display_product_list(df_to_show, is_global_search=False):
+# ─────────────────────────────────────────────────────────────────────────────
+def _render_product_list(df: pd.DataFrame, expanded: bool = False) -> None:
     """
-    Render the product list grouped by Category, with subcategory headers,
-    thumbnails, badges, and per-product checkboxes.
+    Render products grouped by Category inside collapsible expanders.
+
+    Each row shows:
+      [thumbnail] [product name + status badges] [checkbox]
 
     Args:
-        df_to_show (pd.DataFrame): Filtered/searched product rows to display.
-        is_global_search (bool): If True, expand all category sections by default
-                                  (useful when search returns scattered results).
+        df       – filtered product DataFrame to display
+        expanded – whether to open all expanders by default (used in search mode)
     """
-    # Build a set of ProductIDs already in the cart for fast badge lookup
-    selected_pids = {
-        item.get("ProductID") for item in st.session_state.cart if "ProductID" in item
-    }
-
-    # Nothing to show - give the user a helpful message
-    if df_to_show.empty:
-        st.info("No products match filters/search.")
+    if df.empty:
+        empty_state("🔍", "No products match your current filters or search.")
         return
 
-    # Load DB to check which products have been manually overridden
-    db = load_products_db()
+    # Collect ProductIDs already in cart for badge display
+    cart_pids = {item.get("ProductID") for item in st.session_state.cart}
+
+    # Load overridden ProductIDs for 'EDITED' badge
+    db            = load_products_db()
     overridden_pids = set(db.get("product_overrides", {}).keys())
 
-    # Group by Category so we can render one expander section per category
-    grouped_by_category = df_to_show.groupby('Category', sort=False)
-    for category, cat_group_df in grouped_by_category:
-        cat_count = len(cat_group_df)
+    # Group by Category (preserving original order)
+    for category, cat_df in df.groupby("Category", sort=False):
+        count = len(cat_df)
 
-        # Each category is shown in a collapsible expander
-        with st.expander(f"{category} ({cat_count})", expanded=is_global_search):
+        with st.expander(f"**{category}**  ·  {count} products", expanded=expanded):
 
-            # "Add All" button to bulk-add every product in this category
-            c1, c2 = st.columns([3, 1])
-            with c2:
+            # Bulk-add button for this category only
+            _, btn_col = st.columns([5, 1])
+            with btn_col:
                 if st.button(
-                    f"Add All {cat_count}",
-                    key=f"btn_add_cat_{create_safe_id(category)}",
+                    f"Add all {count}",
+                    key=f"add_all_{create_safe_id(category)}",
                     use_container_width=True,
                 ):
-                    add_to_cart(cat_group_df)
+                    add_to_cart(cat_df)
+                    st.rerun()
 
-            # Iterate subcategories within the category
-            for subcategory, subcat_group_df in cat_group_df.groupby('Subcategory', sort=False):
-                subcategory_str = str(subcategory).strip()
-
-                # Only show subcategory header if it's a real label (not N/A or empty)
-                if subcategory_str.upper() != 'N/A' and subcategory_str.lower() != 'nan':
+            # Iterate subcategories
+            for subcat, sub_df in cat_df.groupby("Subcategory", sort=False):
+                sub_str = str(subcat).strip()
+                # Only show subcategory header if it has a real value
+                if sub_str and sub_str.upper() != "N/A" and sub_str.lower() != "nan":
                     st.markdown(
-                        f"<div class='subcat-header'>{subcategory_str} ({len(subcat_group_df)})</div>",
+                        f"<div class='subcat-header'>▸ {sub_str}"
+                        f" <span style='font-size:10px;opacity:0.6;'>({len(sub_df)})</span></div>",
                         unsafe_allow_html=True,
                     )
 
-                # Render each individual product row
-                for idx, row in subcat_group_df.iterrows():
-                    pid = row['ProductID']
-                    unique_key = f"checkbox_{pid}"                   # Unique key per product for session state
-                    initial_checked = pid in selected_pids           # Pre-check if already in cart
+                # Each product row
+                for _, row in sub_df.iterrows():
+                    pid         = row["ProductID"]
+                    cb_key      = f"checkbox_{pid}"
+                    in_cart     = pid in cart_pids
+                    is_new      = row.get("IsNew") == 1
+                    is_edited   = pid in overridden_pids
+                    is_custom   = str(pid).startswith("CUST_")
 
-                    # ---- Build badge HTML ----
+                    # Build badge HTML
                     badges = ""
-                    if row.get('IsNew') == 1:
-                        badges += " <span class='badge-new'>NEW</span>"          # Red NEW badge
-                    if pid in overridden_pids:
-                        badges += " <span class='badge-modified'>EDITED</span>"  # Yellow EDITED badge
-                    if str(pid).startswith("CUST_"):
-                        badges += " <span class='badge-custom'>CUSTOM</span>"    # Green CUSTOM badge
-                    if pid in selected_pids:
-                        badges += " <span class='badge-in-cart'>IN CART</span>"  # Blue IN CART badge
+                    if is_new:
+                        badges += "<span class='badge-new'>NEW</span>"
+                    if is_edited:
+                        badges += "<span class='badge-modified'>EDITED</span>"
+                    if is_custom:
+                        badges += "<span class='badge-custom'>CUSTOM</span>"
+                    if in_cart:
+                        badges += "<span class='badge-in-cart'>IN CART</span>"
 
-                    # ---- 3-column row: thumbnail | name+badges | checkbox ----
-                    col_thumb, col_name, col_check = st.columns([0.5, 7, 1])
+                    # 3-column layout: thumb | name | checkbox
+                    c_thumb, c_name, c_check = st.columns([0.45, 7, 1])
 
-                    with col_thumb:
-                        # Small 36px thumbnail from base64 image data
-                        thumb = product_thumbnail_html(row.get('ImageB64', ''), size=36)
-                        st.markdown(thumb, unsafe_allow_html=True)
-
-                    with col_name:
-                        # Product name in bold with any applicable status badges
+                    with c_thumb:
                         st.markdown(
-                            f"**{row['ItemName']}**{badges}",
+                            product_thumbnail_html(row.get("ImageB64", ""), size=36),
                             unsafe_allow_html=True,
                         )
-
-                    with col_check:
-                        # Checkbox - label is hidden visually but required by Streamlit
+                    with c_name:
+                        st.markdown(
+                            f"**{row['ItemName']}** {badges}",
+                            unsafe_allow_html=True,
+                        )
+                    with c_check:
                         st.checkbox(
-                            "Select",
-                            value=initial_checked,
-                            key=unique_key,
+                            "select",
+                            value=in_cart,
+                            key=cb_key,
                             label_visibility="hidden",
                         )
 
 
-def render_filter_tab(products_df):
+# ─────────────────────────────────────────────────────────────────────────────
+def render_filter_tab(products_df: pd.DataFrame) -> None:
     """
-    Render Tab 1: Filter Products.
-
-    Layout:
-      - Global search bar at the top (searches across all catalogues)
-      - If search is active: show matching products immediately
-      - Otherwise: Catalogue → Category → Subcategory filters
-                  + Action buttons (ADD SELECTED, ADD FILTERED, Clear Filters)
-                  + Product list grouped by category
-
-    Args:
-        products_df (pd.DataFrame): Full products DataFrame loaded from Excel + DB.
+    Render Tab 1 — Filter Products.
+    Called from app.py inside `with tab1:`.
     """
-    # Guard: if data didn't load, show error
     if products_df.empty:
-        st.error("No Data. Please check Excel file paths or run Admin Sync.")
+        st.error("⚠️ No product data found. Check Excel file paths or run **Refresh** in the sidebar.")
         return
 
-    # Start with the full dataset; filtering narrows it down
-    final_df = products_df.copy()
+    working_df = products_df.copy()
 
-    # ------------------------------------------------------------------
-    # Global Search Bar
-    # Searches across ItemName, Fragrance, and SKU Code simultaneously
-    # ------------------------------------------------------------------
-    def update_search():
-        """Sync the text input widget value into session state."""
-        st.session_state.item_search_query = st.session_state["item_search_input"]
+    # ── Global search bar ─────────────────────────────────────────────────
+    def _sync_search():
+        st.session_state.item_search_query = st.session_state["_search_input_key"]
 
     search_term = st.text_input(
-        "Global Search (Products, Fragrance, SKU)",
+        "🔍 Global Search — products, fragrances, SKU codes",
         value=st.session_state.item_search_query,
-        key="item_search_input",
-        on_change=update_search,
-        placeholder="Type to search across all products...",
-    ).lower()   # Convert to lowercase for case-insensitive matching
+        key="_search_input_key",
+        on_change=_sync_search,
+        placeholder="e.g. Rose, Lavender, HEM-001 …",
+    ).strip().lower()
 
-    # ------------------------------------------------------------------
-    # SEARCH MODE: show results directly, skip category filters
-    # ------------------------------------------------------------------
+    # ═════════════════════════════════════════════════════════════════════
+    # SEARCH MODE
+    # ═════════════════════════════════════════════════════════════════════
     if search_term:
-        # Filter across all three text columns
-        final_df = products_df[
-            products_df['ItemName'].str.lower().str.contains(search_term, na=False) |
-            products_df['Fragrance'].str.lower().str.contains(search_term, na=False) |
-            products_df['SKU Code'].str.lower().str.contains(search_term, na=False)
+        working_df = products_df[
+            products_df["ItemName"].str.lower().str.contains(search_term, na=False) |
+            products_df["Fragrance"].str.lower().str.contains(search_term, na=False) |
+            products_df["SKU Code"].str.lower().str.contains(search_term, na=False)
         ]
-        # Show a stats bar with the match count
         stats_bar([
-            ("Found", f"{len(final_df)} items matching '{search_term}'"),
+            ("Search results", f"{len(working_df)} products"),
             ("Cart", f"{len(st.session_state.cart)} items"),
         ])
-        # Render results with all categories expanded (is_global_search=True)
-        _display_product_list(final_df, is_global_search=True)
+        _render_product_list(working_df, expanded=True)
+        return
 
-    else:
-        # ------------------------------------------------------------------
-        # FILTER MODE: Catalogue → Category → Subcategory drilldown
-        # ------------------------------------------------------------------
-        col_filter, col_btns = st.columns([3, 1])
+    # ═════════════════════════════════════════════════════════════════════
+    # FILTER MODE — Catalogue → Category → Subcategory
+    # ═════════════════════════════════════════════════════════════════════
+    col_filters, col_actions = st.columns([3, 1])
 
-        with col_filter:
-            st.markdown("#### Filters")
-
-            # ---- Catalogue Dropdown ----
-            # First level: pick one catalogue (or keep "Select..." placeholder)
-            catalogue_options = [NO_SELECTION_PLACEHOLDER] + products_df['Catalogue'].unique().tolist()
-            try:
-                # Preserve the previously selected catalogue across reruns
-                default_index_cat = catalogue_options.index(
-                    st.session_state.selected_catalogue_dropdown
-                )
-            except ValueError:
-                default_index_cat = 0  # Fall back to placeholder if state is stale
-
-            sel_cat = st.selectbox(
-                "Catalogue",
-                catalogue_options,
-                key="selected_catalogue_dropdown",
-                index=default_index_cat,
+    with col_filters:
+        # ── Catalogue selectbox ───────────────────────────────────────────
+        catalogue_opts = [NO_SELECTION_PLACEHOLDER] + \
+                         products_df["Catalogue"].unique().tolist()
+        try:
+            cat_idx = catalogue_opts.index(
+                st.session_state.selected_catalogue_dropdown
             )
+        except ValueError:
+            cat_idx = 0
 
-            # ---- Category Multi-Select (only if a catalogue is chosen) ----
-            if sel_cat != NO_SELECTION_PLACEHOLDER:
-                # Narrow the product set to the selected catalogue
-                catalog_subset_df = products_df[products_df['Catalogue'] == sel_cat]
-                category_options = catalog_subset_df['Category'].unique().tolist()
+        selected_catalogue = st.selectbox(
+            "📚 Catalogue",
+            catalogue_opts,
+            index=cat_idx,
+            key="selected_catalogue_dropdown",
+        )
 
-                # Clean up session state if previously selected categories no longer exist
-                valid_defaults_cat = [
-                    c for c in st.session_state.selected_categories_multi
-                    if c in category_options
-                ]
-                if valid_defaults_cat != st.session_state.selected_categories_multi:
-                    st.session_state.selected_categories_multi = valid_defaults_cat
+        # ── Category multi-select (visible only after a catalogue is chosen) ──
+        if selected_catalogue != NO_SELECTION_PLACEHOLDER:
+            catalogue_df   = products_df[products_df["Catalogue"] == selected_catalogue]
+            all_categories = catalogue_df["Category"].unique().tolist()
 
-                # Multi-select for one or more categories within the catalogue
-                sel_cats_multi = st.multiselect(
-                    "Category",
-                    category_options,
-                    default=st.session_state.selected_categories_multi,
-                    key="category_multiselect",
+            # Sanitise session state in case catalogue changed
+            valid_cats = [
+                c for c in st.session_state.selected_categories_multi
+                if c in all_categories
+            ]
+            if valid_cats != st.session_state.selected_categories_multi:
+                st.session_state.selected_categories_multi = valid_cats
+
+            selected_categories = st.multiselect(
+                "🏷️ Category  (choose one or more)",
+                all_categories,
+                default=st.session_state.selected_categories_multi,
+                key="category_multiselect",
+            )
+            st.session_state.selected_categories_multi = selected_categories
+
+            # ── Per-category subcategory multi-select ─────────────────────
+            filtered_parts: list[pd.DataFrame] = []
+
+            if selected_categories:
+                st.markdown(
+                    '<div class="gold-divider" style="margin:10px 0 8px;"></div>',
+                    unsafe_allow_html=True,
                 )
-                # Keep session state in sync with widget value
-                st.session_state.selected_categories_multi = sel_cats_multi
+                st.markdown(
+                    '<span style="font-size:12px;color:#6b4040;'
+                    'text-transform:uppercase;letter-spacing:1px;">'
+                    '⬧ Sub-Category Filters</span>',
+                    unsafe_allow_html=True,
+                )
 
-                # ---- Subcategory filters per selected Category ----
-                if sel_cats_multi:
-                    filtered_dfs = []
-                    st.markdown("---")
-                    st.markdown("**Sub-Category Options:**")
+                for cat in selected_categories:
+                    cat_data   = catalogue_df[catalogue_df["Category"] == cat]
+                    raw_subs   = cat_data["Subcategory"].unique().tolist()
+                    clean_subs = [
+                        s for s in raw_subs
+                        if str(s).strip()
+                        and str(s).strip().upper() != "N/A"
+                        and str(s).strip().lower() != "nan"
+                    ]
 
-                    for category in sel_cats_multi:
-                        # Get all products in this category
-                        cat_data = catalog_subset_df[catalog_subset_df['Category'] == category]
-                        raw_subs = cat_data['Subcategory'].unique().tolist()
-
-                        # Filter out empty / placeholder subcategory values
-                        clean_subs = [
-                            s for s in raw_subs
-                            if str(s).strip().upper() != 'N/A'
-                            and str(s).strip().lower() != 'nan'
-                            and str(s).strip() != ''
-                        ]
-
-                        if clean_subs:
-                            # Show subcategory picker for this category, defaulting to all selected
-                            safe_cat_key = create_safe_id(category)
-                            sel_subs = st.multiselect(
-                                f"Select for **{category}**",
-                                clean_subs,
-                                default=clean_subs,           # Start with all selected
-                                key=f"sub_select_{safe_cat_key}",
-                            )
-                            # Filter products: show selected subcategories PLUS items with no subcategory
-                            cat_data_filtered = cat_data[
-                                cat_data['Subcategory'].isin(sel_subs) |
-                                cat_data['Subcategory'].isin(['N/A', 'nan', '']) |
-                                cat_data['Subcategory'].isna()
-                            ]
-                            filtered_dfs.append(cat_data_filtered)
-                        else:
-                            # No subcategories for this category - include all products
-                            filtered_dfs.append(cat_data)
-
-                    # Combine filtered results from all selected categories
-                    if filtered_dfs:
-                        import pandas as pd
-                        final_df = pd.concat(filtered_dfs)
+                    if clean_subs:
+                        chosen_subs = st.multiselect(
+                            f"Sub-categories for **{cat}**",
+                            clean_subs,
+                            default=clean_subs,   # start with all selected
+                            key=f"sub_{create_safe_id(cat)}",
+                        )
+                        # Keep all items with chosen subcategory OR no subcategory
+                        mask = (
+                            cat_data["Subcategory"].isin(chosen_subs) |
+                            cat_data["Subcategory"].isin(["N/A", "nan", ""]) |
+                            cat_data["Subcategory"].isna()
+                        )
+                        filtered_parts.append(cat_data[mask])
                     else:
-                        import pandas as pd
-                        final_df = pd.DataFrame(columns=products_df.columns)
-                else:
-                    # No categories selected yet - show full catalogue
-                    final_df = catalog_subset_df
+                        filtered_parts.append(cat_data)
 
-        # ---- Action Buttons column ----
-        with col_btns:
-            st.markdown("#### Actions")
-
-            # ADD SELECTED: adds only the checkbox-ticked products currently visible
-            if st.button("ADD SELECTED", use_container_width=True, type="primary"):
-                add_selected_visible_to_cart(final_df)
-
-            # ADD FILTERED: adds every product currently visible (regardless of checkboxes)
-            if st.button("ADD FILTERED", use_container_width=True, type="secondary"):
-                add_to_cart(final_df)
-
-            # CLEAR FILTERS: resets all dropdowns and search back to defaults
-            st.button(
-                "Clear Filters",
-                use_container_width=True,
-                on_click=clear_filters_dropdown,   # Callback runs before the next rerun
-            )
-
-        st.markdown("---")
-
-        # ---- Show stats + product list when a catalogue is selected ----
-        if sel_cat != NO_SELECTION_PLACEHOLDER:
-            stats_bar([
-                ("Showing", f"{len(final_df)} products"),
-                ("Cart", f"{len(st.session_state.cart)} items"),
-            ])
-            if not final_df.empty:
-                _display_product_list(final_df)
+                working_df = (
+                    pd.concat(filtered_parts, ignore_index=True)
+                    if filtered_parts
+                    else pd.DataFrame(columns=products_df.columns)
+                )
             else:
-                st.info("Please select one or more **Categories**.")
-        else:
-            # Prompt the user to start by picking a catalogue
-            st.info("Please select a **Catalogue** to begin.")
+                # No categories selected — show full catalogue
+                working_df = catalogue_df
+
+    # ── Action buttons ────────────────────────────────────────────────────
+    with col_actions:
+        st.markdown(
+            '<div style="margin-top:28px;"></div>',
+            unsafe_allow_html=True,
+        )
+        if st.button("✅ ADD SELECTED", use_container_width=True, type="primary"):
+            add_selected_visible_to_cart(working_df)
+            st.rerun()
+
+        if st.button("➕ ADD FILTERED", use_container_width=True, type="secondary"):
+            add_to_cart(working_df)
+            st.rerun()
+
+        st.button(
+            "🗑 Clear Filters",
+            use_container_width=True,
+            on_click=clear_filters_dropdown,
+        )
+
+    st.markdown(
+        '<div class="gold-divider" style="margin:14px 0 10px;"></div>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Product list ──────────────────────────────────────────────────────
+    if selected_catalogue == NO_SELECTION_PLACEHOLDER:
+        empty_state("📚", "Select a <strong>Catalogue</strong> above to begin browsing.")
+    elif working_df.empty:
+        empty_state("🏷️", "No products found for the selected filters.")
+    else:
+        stats_bar([
+            ("Showing", f"{len(working_df)} products"),
+            ("Categories", f"{working_df['Category'].nunique()}"),
+            ("Cart", f"{len(st.session_state.cart)} items"),
+        ])
+        _render_product_list(working_df, expanded=False)
