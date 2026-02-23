@@ -1,1 +1,1 @@
-# UI package for HEM Product Catalogue v3
+# HEM Product Catalogue v3

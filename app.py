@@ -1,184 +1,128 @@
 """
-HEM Product Catalogue - Main Application Entry Point
-=====================================================
-This is the top-level file that Streamlit runs.
+HEM Product Catalogue v3 — Main Entry Point
+============================================
+Run with:  streamlit run app.py
 
-Usage:
-    streamlit run app.py
-
-Structure:
-    app.py              ← You are here. Initialises services and renders the layout.
-    config.py           ← All paths, constants, and env variables.
-    styles.py           ← All CSS injected into the page.
-    cloudinary_client.py← Cloudinary SDK wrapper (images, DB backup).
-    database.py         ← JSON database: cart, overrides, custom products, templates.
-    data_loader.py      ← Loads Excel catalogues and merges with DB overrides.
-    cart.py             ← Cart add/remove/clear operations.
-    pdf_generator.py    ← PDF (WeasyPrint/pdfkit) and Excel generation.
-    ui/
-        sidebar.py          ← Sidebar: templates, sync, database info.
-        tab_filter.py       ← Tab 1: Filter and browse products.
-        tab_review.py       ← Tab 2: Review & edit cart items.
-        tab_export.py       ← Tab 3: Generate and download PDF / Excel.
-        tab_add_product.py  ← Tab 4: Add custom products.
-        components.py       ← Shared reusable UI helpers.
+Architecture:
+  app.py              → bootstraps services, layout, tabs
+  config.py           → all paths & constants
+  styles.py           → full luxury dark-gold CSS
+  cloudinary_client.py→ Cloudinary SDK (images, DB backup)
+  database.py         → JSON DB (cart, overrides, custom products)
+  data_loader.py      → Excel + Cloudinary image pipeline
+  cart.py             → cart add / remove / clear helpers
+  pdf_generator.py    → PDF (WeasyPrint/pdfkit) + Excel export
+  ui/sidebar.py       → sidebar: templates, sync, info
+  ui/tab_filter.py    → Tab 1: browse & filter products
+  ui/tab_review.py    → Tab 2: review & edit cart
+  ui/tab_export.py    → Tab 3: generate PDF / Excel
+  ui/tab_add_product.py → Tab 4: add custom products
+  ui/components.py    → shared UI helpers
 """
-import time      # Used for data_timestamp to bust the data cache
-import logging   # Standard library logging
+import time
+import logging
 
 import streamlit as st
 
-# =========================================================================
-# Logging Setup
-# Configure before any other imports so all modules use the same format
-# =========================================================================
+# ── Logging (configure first so all modules inherit it) ───────────────────
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format="%(asctime)s │ %(name)s │ %(levelname)s │ %(message)s",
 )
 logger = logging.getLogger(__name__)
 
-# =========================================================================
-# Module Imports
-# =========================================================================
-from config import NO_SELECTION_PLACEHOLDER, APP_TITLE, APP_ICON  # UI constants
-from styles import APP_CSS                                          # All CSS styles
-from cloudinary_client import init_cloudinary                       # Cloudinary SDK init
-from database import load_cart_from_db, migrate_old_custom_items   # DB helpers
-from data_loader import load_data_cached                            # Excel loader
-
-# =========================================================================
-# Page Configuration
-# MUST be the very first Streamlit command called - before any other st.*
-# =========================================================================
+# ── Page config — MUST be first Streamlit call ────────────────────────────
+from config import NO_SELECTION_PLACEHOLDER, APP_TITLE, APP_ICON
 st.set_page_config(
-    page_title=APP_TITLE,   # Browser tab title
-    page_icon=APP_ICON,     # Browser tab emoji/icon
-    layout="wide",          # Use full browser width
+    page_title=APP_TITLE,
+    page_icon=APP_ICON,
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-# =========================================================================
-# Initialize Services
-# Connect to Cloudinary using credentials from environment variables
-# =========================================================================
-init_cloudinary()
+# ── Remaining imports ─────────────────────────────────────────────────────
+from styles import APP_CSS
+from cloudinary_client import init_cloudinary
+from database import load_cart_from_db, migrate_old_custom_items
+from data_loader import load_data_cached
 
-# =========================================================================
-# Inject CSS
-# Injects APP_CSS (from styles.py) into every page render
-# =========================================================================
+# ── Inject CSS ────────────────────────────────────────────────────────────
 st.markdown(APP_CSS, unsafe_allow_html=True)
 
-# =========================================================================
-# Session State Initialization
-# Streamlit re-runs this script on every user interaction, so we use
-# session_state to preserve values across reruns within one browser session.
-# =========================================================================
-if "cart" not in st.session_state:
-    # Load the last saved cart from the JSON database on first run
+# ── Initialize Cloudinary SDK ─────────────────────────────────────────────
+init_cloudinary()
+
+# ── Session-state defaults (survive reruns within one browser session) ────
+_defaults = {
+    "cart":                         None,           # filled from DB below
+    "gen_pdf_bytes":                None,
+    "gen_excel_bytes":              None,
+    "selected_catalogue_dropdown":  NO_SELECTION_PLACEHOLDER,
+    "selected_categories_multi":    [],
+    "selected_subcategories_multi": [],
+    "item_search_query":            "",
+    "master_pid_map":               {},
+    "data_timestamp":               time.time(),
+}
+for key, val in _defaults.items():
+    if key not in st.session_state:
+        st.session_state[key] = val
+
+# Load persisted cart from JSON DB on first run only
+if st.session_state.cart is None:
     st.session_state.cart = load_cart_from_db()
 
-if "gen_pdf_bytes" not in st.session_state:
-    # Stores generated PDF bytes so the download button works after generation
-    st.session_state.gen_pdf_bytes = None
-
-if "gen_excel_bytes" not in st.session_state:
-    # Stores generated Excel bytes for the download button
-    st.session_state.gen_excel_bytes = None
-
-if 'selected_catalogue_dropdown' not in st.session_state:
-    # Tracks the currently selected catalogue in Tab 1 filter dropdown
-    st.session_state.selected_catalogue_dropdown = NO_SELECTION_PLACEHOLDER
-
-if 'selected_categories_multi' not in st.session_state:
-    # Tracks which categories are selected in the multi-select filter
-    st.session_state.selected_categories_multi = []
-
-if 'selected_subcategories_multi' not in st.session_state:
-    # Tracks which subcategories are selected
-    st.session_state.selected_subcategories_multi = []
-
-if 'item_search_query' not in st.session_state:
-    # Global search box value persisted across reruns
-    st.session_state.item_search_query = ""
-
-if 'master_pid_map' not in st.session_state:
-    # dict: ProductID → full product row dict, used for fast lookups when adding to cart
-    st.session_state['master_pid_map'] = {}
-
-if 'data_timestamp' not in st.session_state:
-    # Timestamp used as a cache key - updating it forces data to reload from disk
-    st.session_state.data_timestamp = time.time()
-
-# =========================================================================
-# One-time Migration
-# Converts legacy custom_products.json file into the new unified DB format
-# Only runs once per installation (no-op if already migrated)
-# =========================================================================
+# ── One-time migration from legacy custom_products.json ──────────────────
 migrate_old_custom_items()
 
-# =========================================================================
-# Load Data
-# Reads all Excel catalogues + merges with DB overrides (cached by timestamp)
-# =========================================================================
+# ── Load product data (cached; bust cache by updating data_timestamp) ─────
 products_df = load_data_cached(st.session_state.data_timestamp)
 
-# Build the master ProductID → row dict map for fast cart lookups
-st.session_state['master_pid_map'] = {
-    row['ProductID']: row.to_dict() for _, row in products_df.iterrows()
+# Rebuild fast ProductID → row lookup map
+st.session_state.master_pid_map = {
+    row["ProductID"]: row.to_dict() for _, row in products_df.iterrows()
 }
 
-# =========================================================================
-# Sidebar
-# Renders template management, data sync button, and database info
-# =========================================================================
+# ── Sidebar ───────────────────────────────────────────────────────────────
 from ui.sidebar import render_sidebar
 render_sidebar()
 
-# =========================================================================
-# Main Title Banner
-# =========================================================================
+# ── Main title banner ─────────────────────────────────────────────────────
 st.markdown(
-    f'<div class="main-title">{APP_TITLE}</div>',
+    """
+    <div class="main-title">
+        <span class="title-brand">HEM Product Catalogue</span>
+        <span class="title-sub">Premium Incense &amp; Fragrance Collection — Export Edition</span>
+    </div>
+    """,
     unsafe_allow_html=True,
 )
 
-# =========================================================================
-# Tab Navigation
-# Shows number of items in cart on Tab 2's label
-# =========================================================================
+# ── Tab navigation ────────────────────────────────────────────────────────
 cart_count = len(st.session_state.cart)
-cart_label = (
-    f"2. Review & Edit ({cart_count})"  # e.g. "2. Review & Edit (12)"
-    if cart_count > 0
-    else "2. Review & Edit"
-)
+cart_label = f"✏️ Review & Edit ({cart_count})" if cart_count else "✏️ Review & Edit"
 
-# Create four main tabs
 tab1, tab2, tab3, tab4 = st.tabs([
-    "1. Filter Products",  # Browse and select products
-    cart_label,            # Review cart + edit product names
-    "3. Export",           # Generate PDF catalogue + Excel order sheet
-    "4. Add Product",      # Add custom products not in the Excel files
+    "🔍 Filter Products",
+    cart_label,
+    "📄 Export",
+    "➕ Add Product",
 ])
 
-# =========================================================================
-# Tab Rendering
-# Import each tab's render function and call it inside the correct tab context
-# =========================================================================
-from ui.tab_filter import render_filter_tab
-from ui.tab_review import render_review_tab
-from ui.tab_export import render_export_tab
+# ── Render tabs ───────────────────────────────────────────────────────────
+from ui.tab_filter      import render_filter_tab
+from ui.tab_review      import render_review_tab
+from ui.tab_export      import render_export_tab
 from ui.tab_add_product import render_add_product_tab
 
 with tab1:
-    render_filter_tab(products_df)   # Pass full product data to filter tab
+    render_filter_tab(products_df)
 
 with tab2:
-    render_review_tab()              # Cart is read from st.session_state.cart
+    render_review_tab()
 
 with tab3:
-    render_export_tab(products_df)   # Needs products_df for sorting export order
+    render_export_tab(products_df)
 
 with tab4:
-    render_add_product_tab(products_df)  # Needs products_df to check for duplicates
+    render_add_product_tab(products_df)
