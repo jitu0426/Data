@@ -9,9 +9,9 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ── Cloudinary credentials (set these in Streamlit Cloud → Secrets) ─────────
 # Locally you can put them in a .env file or system environment variables.
-CLOUDINARY_CLOUD_NAME = os.environ.get("CLOUDINARY_CLOUD_NAME", "tov7hy7nb")
-CLOUDINARY_API_KEY    = os.environ.get("CLOUDINARY_API_KEY",    "public_1JQ1CHYT064IsWvlfWoInjo2LWk=")
-CLOUDINARY_API_SECRET = os.environ.get("CLOUDINARY_API_SECRET", "private_ZmZna8+ENuwze8tG9goU4Iny7NQ=")
+CLOUDINARY_CLOUD_NAME = os.environ.get("imagekit.io_NAME", "tov7hy7nb")
+CLOUDINARY_API_KEY    = os.environ.get("imagekit.io_API_KEY",    "public_1JQ1CHYT064IsWvlfWoInjo2LWk=")
+CLOUDINARY_API_SECRET = os.environ.get("imagekit.io_API_SECRET", "private_ZmZna8+ENuwze8tG9goU4Iny7NQ=")
 
 # ── Local asset paths ────────────────────────────────────────────────────────
 LOGO_PATH          = os.path.join(BASE_DIR, "assets", "logo.png")
